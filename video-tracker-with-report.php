@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Enhanced Video Tracker with Report
- * Description: Track multiple YouTube and self-hosted videos watched by logged-in users with comprehensive admin report.
- * Version: 3.0
+ * Plugin Name: Enhanced Video Tracker with Report & Export
+ * Description: Track multiple YouTube and self-hosted videos watched by logged-in users with comprehensive admin report and export functionality.
+ * Version: 3.1
  * Author: Raj Verma
  */
 
@@ -47,7 +47,7 @@ function vtr_create_table() {
     error_log('VTR: Table exists check: ' . ($table_exists ? 'Yes' : 'No'));
     
     // Store plugin version
-    update_option('vtr_plugin_version', '3.0');
+    update_option('vtr_plugin_version', '3.1');
 }
 
 // Add debug function for troubleshooting
@@ -372,6 +372,228 @@ function vtr_ajax_update_record() {
     }
 }
 
+// Function to get filtered data for export
+function vtr_get_filtered_data($search_user = '', $search_session = '', $filter_status = -1, $limit = null) {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'video_watch_progress';
+
+    $query = "SELECT vp.*, u.user_login, u.user_email FROM $table_name vp
+              LEFT JOIN {$wpdb->users} u ON vp.user_id = u.ID
+              WHERE 1=1 ";
+
+    $params = [];
+
+    if ($search_user) {
+        $query .= " AND (u.user_login LIKE %s OR u.user_email LIKE %s) ";
+        $params[] = "%$search_user%";
+        $params[] = "%$search_user%";
+    }
+    if ($search_session) {
+        $query .= " AND vp.session_name LIKE %s ";
+        $params[] = "%$search_session%";
+    }
+    if ($filter_status >= 0) {
+        $query .= " AND vp.status = %d ";
+        $params[] = $filter_status;
+    }
+    
+    $query .= " ORDER BY vp.last_watched DESC";
+    
+    if ($limit) {
+        $query .= " LIMIT " . intval($limit);
+    }
+
+    if (!empty($params)) {
+        return $wpdb->get_results($wpdb->prepare($query, $params));
+    } else {
+        return $wpdb->get_results($query);
+    }
+}
+
+// Export handlers
+add_action('init', 'vtr_handle_export_requests');
+function vtr_handle_export_requests() {
+    if (!isset($_GET['vtr_export']) || !current_user_can('manage_options')) {
+        return;
+    }
+
+    // Verify nonce
+    if (!isset($_GET['nonce']) || !wp_verify_nonce($_GET['nonce'], 'vtr_export_nonce')) {
+        wp_die('Security check failed');
+    }
+
+    $format = sanitize_text_field($_GET['vtr_export']);
+    $search_user = isset($_GET['search_user']) ? sanitize_text_field($_GET['search_user']) : '';
+    $search_session = isset($_GET['search_session']) ? sanitize_text_field($_GET['search_session']) : '';
+    $filter_status = isset($_GET['filter_status']) ? intval($_GET['filter_status']) : -1;
+
+    // Get filtered data
+    $results = vtr_get_filtered_data($search_user, $search_session, $filter_status);
+
+    if (empty($results)) {
+        wp_die('No data found to export');
+    }
+
+    $filename = 'video-watch-report-' . date('Y-m-d-H-i-s');
+
+    switch ($format) {
+        case 'csv':
+            vtr_export_csv($results, $filename);
+            break;
+        case 'excel':
+            vtr_export_excel($results, $filename);
+            break;
+        case 'json':
+            vtr_export_json($results, $filename);
+            break;
+        default:
+            wp_die('Invalid export format');
+    }
+}
+
+// CSV Export
+function vtr_export_csv($data, $filename) {
+    header('Content-Type: text/csv');
+    header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+
+    $output = fopen('php://output', 'w');
+    
+    // CSV headers
+    $headers = [
+        'ID',
+        'User ID',
+        'Username',
+        'Email',
+        'Video ID',
+        'Session Name',
+        'Session ID',
+        'Progress (%)',
+        'Status',
+        'Assessment Taken',
+        'Current Duration',
+        'Full Duration',
+        'Last Watched',
+        'Enrolment Date',
+        'Created At'
+    ];
+    
+    fputcsv($output, $headers);
+    
+    // CSV data
+    foreach ($data as $row) {
+        $csv_row = [
+            $row->id,
+            $row->user_id,
+            $row->user_login ?: 'N/A',
+            $row->user_email ?: 'N/A',
+            $row->video_id,
+            $row->session_name,
+            $row->session_id,
+            $row->percent,
+            vtr_get_status_label($row->status),
+            $row->assessment_taken ? 'Yes' : 'No',
+            $row->current_duration,
+            $row->full_duration,
+            $row->last_watched,
+            $row->enrolment_date ?: 'N/A',
+            $row->created_at
+        ];
+        fputcsv($output, $csv_row);
+    }
+    
+    fclose($output);
+    exit;
+}
+
+// Excel Export (as HTML table that Excel can read)
+function vtr_export_excel($data, $filename) {
+    header('Content-Type: application/vnd.ms-excel');
+    header('Content-Disposition: attachment; filename="' . $filename . '.xls"');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+
+    echo '<table border="1">';
+    echo '<tr style="background-color: #f0f0f0; font-weight: bold;">';
+    echo '<td>ID</td>';
+    echo '<td>User ID</td>';
+    echo '<td>Username</td>';
+    echo '<td>Email</td>';
+    echo '<td>Video ID</td>';
+    echo '<td>Session Name</td>';
+    echo '<td>Session ID</td>';
+    echo '<td>Progress (%)</td>';
+    echo '<td>Status</td>';
+    echo '<td>Assessment Taken</td>';
+    echo '<td>Current Duration</td>';
+    echo '<td>Full Duration</td>';
+    echo '<td>Last Watched</td>';
+    echo '<td>Enrolment Date</td>';
+    echo '<td>Created At</td>';
+    echo '</tr>';
+
+    foreach ($data as $row) {
+        echo '<tr>';
+        echo '<td>' . esc_html($row->id) . '</td>';
+        echo '<td>' . esc_html($row->user_id) . '</td>';
+        echo '<td>' . esc_html($row->user_login ?: 'N/A') . '</td>';
+        echo '<td>' . esc_html($row->user_email ?: 'N/A') . '</td>';
+        echo '<td>' . esc_html($row->video_id) . '</td>';
+        echo '<td>' . esc_html($row->session_name) . '</td>';
+        echo '<td>' . esc_html($row->session_id) . '</td>';
+        echo '<td>' . esc_html($row->percent) . '</td>';
+        echo '<td>' . esc_html(vtr_get_status_label($row->status)) . '</td>';
+        echo '<td>' . esc_html($row->assessment_taken ? 'Yes' : 'No') . '</td>';
+        echo '<td>' . esc_html($row->current_duration) . '</td>';
+        echo '<td>' . esc_html($row->full_duration) . '</td>';
+        echo '<td>' . esc_html($row->last_watched) . '</td>';
+        echo '<td>' . esc_html($row->enrolment_date ?: 'N/A') . '</td>';
+        echo '<td>' . esc_html($row->created_at) . '</td>';
+        echo '</tr>';
+    }
+
+    echo '</table>';
+    exit;
+}
+
+// JSON Export
+function vtr_export_json($data, $filename) {
+    header('Content-Type: application/json');
+    header('Content-Disposition: attachment; filename="' . $filename . '.json"');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+
+    $json_data = [];
+    foreach ($data as $row) {
+        $json_data[] = [
+            'id' => $row->id,
+            'user_id' => $row->user_id,
+            'username' => $row->user_login ?: null,
+            'email' => $row->user_email ?: null,
+            'video_id' => $row->video_id,
+            'session_name' => $row->session_name,
+            'session_id' => $row->session_id,
+            'progress_percent' => $row->percent,
+            'status' => vtr_get_status_label($row->status),
+            'status_code' => $row->status,
+            'assessment_taken' => (bool)$row->assessment_taken,
+            'current_duration' => $row->current_duration,
+            'full_duration' => $row->full_duration,
+            'last_watched' => $row->last_watched,
+            'enrolment_date' => $row->enrolment_date,
+            'created_at' => $row->created_at
+        ];
+    }
+
+    echo json_encode([
+        'export_date' => current_time('mysql'),
+        'total_records' => count($json_data),
+        'data' => $json_data
+    ], JSON_PRETTY_PRINT);
+    exit;
+}
+
 function vtr_render_report_page() {
     if (!current_user_can('manage_options')) {
         wp_die('Access denied');
@@ -385,22 +607,20 @@ function vtr_render_report_page() {
     $search_session = isset($_GET['search_session']) ? sanitize_text_field($_GET['search_session']) : '';
     $filter_status = isset($_GET['filter_status']) ? intval($_GET['filter_status']) : -1;
 
-    $query = "SELECT vp.*, u.user_login, u.user_email FROM $table_name vp
-              LEFT JOIN {$wpdb->users} u ON vp.user_id = u.ID
-              WHERE 1=1 ";
+    // Get filtered results with limit for display
+    $results = vtr_get_filtered_data($search_user, $search_session, $filter_status, 100);
 
-    if ($search_user) {
-        $query .= $wpdb->prepare(" AND (u.user_login LIKE %s OR u.user_email LIKE %s) ", "%$search_user%", "%$search_user%");
-    }
-    if ($search_session) {
-        $query .= $wpdb->prepare(" AND vp.session_name LIKE %s ", "%$search_session%");
-    }
-    if ($filter_status >= 0) {
-        $query .= $wpdb->prepare(" AND vp.status = %d ", $filter_status);
-    }
-    
-    $query .= " ORDER BY vp.last_watched DESC LIMIT 100";
-    $results = $wpdb->get_results($query);
+    // Generate export URLs
+    $export_params = [
+        'search_user' => $search_user,
+        'search_session' => $search_session,
+        'filter_status' => $filter_status,
+        'nonce' => wp_create_nonce('vtr_export_nonce')
+    ];
+
+    $csv_url = add_query_arg(array_merge($export_params, ['vtr_export' => 'csv']), admin_url('admin.php'));
+    $excel_url = add_query_arg(array_merge($export_params, ['vtr_export' => 'excel']), admin_url('admin.php'));
+    $json_url = add_query_arg(array_merge($export_params, ['vtr_export' => 'json']), admin_url('admin.php'));
 
     ?>
     <div class="wrap">
@@ -413,6 +633,29 @@ function vtr_render_report_page() {
                 <h3>Debug Information</h3>
                 <pre id="debug-content"></pre>
             </div>
+        </div>
+
+        <!-- Export Section -->
+        <div style="margin-bottom: 20px; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 4px;">
+            <h3 style="margin-top: 0;">Export Data</h3>
+            <p>Export current filtered results in your preferred format:</p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <a href="<?php echo esc_url($csv_url); ?>" class="button button-secondary">
+                    <span class="dashicons dashicons-media-spreadsheet" style="margin-right: 5px;"></span>
+                    Export as CSV
+                </a>
+                <a href="<?php echo esc_url($excel_url); ?>" class="button button-secondary">
+                    <span class="dashicons dashicons-media-spreadsheet" style="margin-right: 5px;"></span>
+                    Export as Excel
+                </a>
+                <a href="<?php echo esc_url($json_url); ?>" class="button button-secondary">
+                    <span class="dashicons dashicons-media-code" style="margin-right: 5px;"></span>
+                    Export as JSON
+                </a>
+            </div>
+            <small style="color: #666; display: block; margin-top: 10px;">
+                Note: Exports include all records matching current filters (not limited to 100 shown below).
+            </small>
         </div>
 
         <!-- Search Form -->
@@ -436,6 +679,11 @@ function vtr_render_report_page() {
         <?php if(empty($results)) : ?>
             <div class="notice notice-info"><p>No records found.</p></div>
         <?php else: ?>
+            <div style="margin-bottom: 10px;">
+                <small style="color: #666;">
+                    Showing up to 100 records. Use export options above to get all filtered data.
+                </small>
+            </div>
             <table class="widefat fixed striped" cellspacing="0">
                 <thead>
                     <tr>
@@ -852,3 +1100,102 @@ function vtr_render_report_page() {
     </script>
     <?php
 }
+
+// Add admin notice for successful exports
+add_action('admin_notices', function() {
+    if (isset($_GET['exported']) && current_user_can('manage_options')) {
+        $format = sanitize_text_field($_GET['exported']);
+        echo '<div class="notice notice-success is-dismissible">';
+        echo '<p>Video report successfully exported as ' . esc_html(strtoupper($format)) . '!</p>';
+        echo '</div>';
+    }
+});
+
+// Bulk actions for export (optional enhancement)
+add_action('wp_ajax_vtr_bulk_export', 'vtr_ajax_bulk_export');
+function vtr_ajax_bulk_export() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Access denied']);
+    }
+
+    if (!wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
+        wp_send_json_error(['message' => 'Security check failed']);
+    }
+
+    $selected_ids = isset($_POST['selected_ids']) ? array_map('intval', $_POST['selected_ids']) : [];
+    $format = sanitize_text_field($_POST['format']);
+
+    if (empty($selected_ids)) {
+        wp_send_json_error(['message' => 'No records selected']);
+    }
+
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'video_watch_progress';
+    
+    $placeholders = implode(',', array_fill(0, count($selected_ids), '%d'));
+    $query = "SELECT vp.*, u.user_login, u.user_email FROM $table_name vp
+              LEFT JOIN {$wpdb->users} u ON vp.user_id = u.ID
+              WHERE vp.id IN ($placeholders)
+              ORDER BY vp.last_watched DESC";
+    
+    $results = $wpdb->get_results($wpdb->prepare($query, $selected_ids));
+
+    if (empty($results)) {
+        wp_send_json_error(['message' => 'No records found']);
+    }
+
+    $filename = 'video-watch-report-selected-' . date('Y-m-d-H-i-s');
+
+    // Generate download URL with temporary token
+    $temp_token = wp_generate_password(32, false);
+    set_transient('vtr_temp_export_' . $temp_token, [
+        'data' => $results,
+        'format' => $format,
+        'filename' => $filename
+    ], 300); // 5 minutes
+
+    $download_url = add_query_arg([
+        'vtr_temp_export' => $temp_token,
+        'nonce' => wp_create_nonce('vtr_temp_export_nonce')
+    ], admin_url('admin.php'));
+
+    wp_send_json_success(['download_url' => $download_url]);
+}
+
+// Handle temporary export downloads
+add_action('init', 'vtr_handle_temp_export');
+function vtr_handle_temp_export() {
+    if (!isset($_GET['vtr_temp_export']) || !current_user_can('manage_options')) {
+        return;
+    }
+
+    if (!wp_verify_nonce($_GET['nonce'], 'vtr_temp_export_nonce')) {
+        wp_die('Security check failed');
+    }
+
+    $token = sanitize_text_field($_GET['vtr_temp_export']);
+    $export_data = get_transient('vtr_temp_export_' . $token);
+
+    if (!$export_data) {
+        wp_die('Export link expired or invalid');
+    }
+
+    // Delete the temporary data
+    delete_transient('vtr_temp_export_' . $token);
+
+    switch ($export_data['format']) {
+        case 'csv':
+            vtr_export_csv($export_data['data'], $export_data['filename']);
+            break;
+        case 'excel':
+            vtr_export_excel($export_data['data'], $export_data['filename']);
+            break;
+        case 'json':
+            vtr_export_json($export_data['data'], $export_data['filename']);
+            break;
+        default:
+            wp_die('Invalid export format');
+    }
+}
+
+?>
