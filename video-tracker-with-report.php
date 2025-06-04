@@ -279,34 +279,64 @@ add_action('wp_ajax_vtr_update_record', 'vtr_ajax_update_record');
 add_action('wp_ajax_vtr_get_record', 'vtr_ajax_get_record');
 
 function vtr_ajax_delete_record() {
+    // Check permissions
     if (!current_user_can('manage_options')) {
         wp_send_json_error(['message' => 'Access denied']);
+        return;
     }
 
-    if (!wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
+    // Check nonce
+    if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
         wp_send_json_error(['message' => 'Security check failed']);
+        return;
+    }
+
+    // Validate record ID
+    if (!isset($_POST['record_id']) || empty($_POST['record_id'])) {
+        wp_send_json_error(['message' => 'Record ID is required']);
+        return;
     }
 
     global $wpdb;
     $table_name = $wpdb->prefix . 'video_watch_progress';
     $record_id = intval($_POST['record_id']);
 
-    $result = $wpdb->delete($table_name, ['id' => $record_id]);
+    // Check if record exists
+    $record_exists = $wpdb->get_var($wpdb->prepare(
+        "SELECT id FROM $table_name WHERE id = %d", $record_id
+    ));
+
+    if (!$record_exists) {
+        wp_send_json_error(['message' => 'Record not found']);
+        return;
+    }
+
+    $result = $wpdb->delete($table_name, ['id' => $record_id], ['%d']);
     
-    if ($result) {
+    if ($result !== false) {
         wp_send_json_success(['message' => 'Record deleted successfully']);
     } else {
-        wp_send_json_error(['message' => 'Failed to delete record']);
+        wp_send_json_error(['message' => 'Failed to delete record: ' . $wpdb->last_error]);
     }
 }
 
 function vtr_ajax_get_record() {
+    // Check permissions
     if (!current_user_can('manage_options')) {
         wp_send_json_error(['message' => 'Access denied']);
+        return;
     }
 
-    if (!wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
+    // Check nonce
+    if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
         wp_send_json_error(['message' => 'Security check failed']);
+        return;
+    }
+
+    // Validate record ID
+    if (!isset($_POST['record_id']) || empty($_POST['record_id'])) {
+        wp_send_json_error(['message' => 'Record ID is required']);
+        return;
     }
 
     global $wpdb;
@@ -328,29 +358,44 @@ function vtr_ajax_get_record() {
 }
 
 function vtr_ajax_update_record() {
+    // Check permissions
     if (!current_user_can('manage_options')) {
         wp_send_json_error(['message' => 'Access denied']);
+        return;
     }
 
-    if (!wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
+    // Check nonce
+    if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'vtr_admin_nonce')) {
         wp_send_json_error(['message' => 'Security check failed']);
+        return;
+    }
+
+    // Validate required fields
+    if (!isset($_POST['record_id']) || empty($_POST['record_id'])) {
+        wp_send_json_error(['message' => 'Record ID is required']);
+        return;
     }
 
     global $wpdb;
     $table_name = $wpdb->prefix . 'video_watch_progress';
     
     $record_id = intval($_POST['record_id']);
-    $percent = max(0, min(100, intval($_POST['percent'])));
-    $assessment_taken = intval($_POST['assessment_taken']);
-    $current_duration = sanitize_text_field($_POST['current_duration']);
-    $full_duration = sanitize_text_field($_POST['full_duration']);
+    $percent = isset($_POST['percent']) ? max(0, min(100, intval($_POST['percent']))) : 0;
+    $assessment_taken = isset($_POST['assessment_taken']) ? intval($_POST['assessment_taken']) : 0;
+    $current_duration = isset($_POST['current_duration']) ? sanitize_text_field($_POST['current_duration']) : '00:00:00';
+    $full_duration = isset($_POST['full_duration']) ? sanitize_text_field($_POST['full_duration']) : '00:00:00';
 
-    // Get current record to check enrolment date for status calculation
+    // Check if record exists and get current record to check enrolment date for status calculation
     $current_record = $wpdb->get_row($wpdb->prepare(
-        "SELECT enrolment_date FROM $table_name WHERE id = %d", $record_id
+        "SELECT * FROM $table_name WHERE id = %d", $record_id
     ));
 
-    $status = vtr_calculate_status($percent, $current_record ? $current_record->enrolment_date : null);
+    if (!$current_record) {
+        wp_send_json_error(['message' => 'Record not found']);
+        return;
+    }
+
+    $status = vtr_calculate_status($percent, $current_record->enrolment_date);
 
     $result = $wpdb->update(
         $table_name,
@@ -362,13 +407,15 @@ function vtr_ajax_update_record() {
             'status' => $status,
             'last_watched' => current_time('mysql'),
         ],
-        ['id' => $record_id]
+        ['id' => $record_id],
+        ['%d', '%d', '%s', '%s', '%d', '%s'],
+        ['%d']
     );
 
     if ($result !== false) {
         wp_send_json_success(['message' => 'Record updated successfully']);
     } else {
-        wp_send_json_error(['message' => 'Failed to update record']);
+        wp_send_json_error(['message' => 'Failed to update record: ' . $wpdb->last_error]);
     }
 }
 
@@ -470,13 +517,13 @@ function vtr_export_csv($data, $filename) {
         'Session Name',
         'Session ID',
         'Progress (%)',
-        'Status',
+        'Training Status',
         'Assessment Taken',
-        'Current Duration',
-        'Full Duration',
+        'Total Minutes Consumed',
+        'Total Duration',
         'Last Watched',
         'Enrolment Date',
-        'Created At'
+        // 'Session Publish Date'
     ];
     
     fputcsv($output, $headers);
@@ -497,8 +544,8 @@ function vtr_export_csv($data, $filename) {
             $row->current_duration,
             $row->full_duration,
             $row->last_watched,
-            $row->enrolment_date ?: 'N/A',
             $row->created_at
+            // $row->enrolment_date ?: 'N/A',
         ];
         fputcsv($output, $csv_row);
     }
@@ -524,13 +571,13 @@ function vtr_export_excel($data, $filename) {
     echo '<td>Session Name</td>';
     echo '<td>Session ID</td>';
     echo '<td>Progress (%)</td>';
-    echo '<td>Status</td>';
+    echo '<td>Training Status</td>';
     echo '<td>Assessment Taken</td>';
-    echo '<td>Current Duration</td>';
-    echo '<td>Full Duration</td>';
+    echo '<td>Total Minutes Consumed</td>';
+    echo '<td>Total Duration</td>';
     echo '<td>Last Watched</td>';
     echo '<td>Enrolment Date</td>';
-    echo '<td>Created At</td>';
+    // echo '<td>Created At</td>';
     echo '</tr>';
 
     foreach ($data as $row) {
@@ -548,8 +595,8 @@ function vtr_export_excel($data, $filename) {
         echo '<td>' . esc_html($row->current_duration) . '</td>';
         echo '<td>' . esc_html($row->full_duration) . '</td>';
         echo '<td>' . esc_html($row->last_watched) . '</td>';
-        echo '<td>' . esc_html($row->enrolment_date ?: 'N/A') . '</td>';
         echo '<td>' . esc_html($row->created_at) . '</td>';
+        // echo '<td>' . esc_html($row->enrolment_date ?: 'N/A') . '</td>';
         echo '</tr>';
     }
 
@@ -575,14 +622,14 @@ function vtr_export_json($data, $filename) {
             'session_name' => $row->session_name,
             'session_id' => $row->session_id,
             'progress_percent' => $row->percent,
-            'status' => vtr_get_status_label($row->status),
+            'training_status' => vtr_get_status_label($row->status),
             'status_code' => $row->status,
             'assessment_taken' => (bool)$row->assessment_taken,
-            'current_duration' => $row->current_duration,
-            'full_duration' => $row->full_duration,
+            'total_minutes_consumed' => $row->current_duration,
+            'total_duration' => $row->full_duration,
             'last_watched' => $row->last_watched,
-            'enrolment_date' => $row->enrolment_date,
-            'created_at' => $row->created_at
+            'enrolment_date' => $row->created_at
+            // 'enrolment_date' => $row->enrolment_date,
         ];
     }
 
@@ -665,7 +712,7 @@ function vtr_render_report_page() {
                 <input type="text" name="search_user" placeholder="Search by username or email" value="<?php echo esc_attr($search_user); ?>" />
                 <input type="text" name="search_session" placeholder="Search by session name" value="<?php echo esc_attr($search_session); ?>" />
                 <select name="filter_status">
-                    <option value="-1">All Status</option>
+                    <option value="-1">All Training Status</option>
                     <option value="0" <?php selected($filter_status, 0); ?>>Not Started</option>
                     <option value="1" <?php selected($filter_status, 1); ?>>In Progress</option>
                     <option value="2" <?php selected($filter_status, 2); ?>>Completed</option>
@@ -693,10 +740,10 @@ function vtr_render_report_page() {
                         <th style="width:150px;">Session Name</th>
                         <th style="width:80px;">Progress</th>
                         <th style="width:120px;">Last Watched</th>
-                        <th style="width:100px;">Status</th>
-                        <th style="width:80px;">Current</th>
-                        <th style="width:80px;">Duration</th>
-                        <th style="width:100px;">Enrolled</th>
+                        <th style="width:100px;">Training Status</th>
+                        <th style="width:130px;">Total Minutes Consumed</th>
+                        <th style="width:120px;">Total Duration</th>
+                        <th style="width:120px;">Enrolment Date</th>
                         <th style="width:120px;">Actions</th>
                     </tr>
                 </thead>
@@ -723,7 +770,7 @@ function vtr_render_report_page() {
                         </td>
                         <td><?php echo esc_html($row->current_duration); ?></td>
                         <td><?php echo esc_html($row->full_duration); ?></td>
-                        <td><?php echo $row->enrolment_date ? esc_html(date('M j, Y', strtotime($row->enrolment_date))) : 'N/A'; ?></td>
+                        <td><?php echo $row->created_at ? esc_html(date('M j, Y', strtotime($row->created_at))) : 'N/A'; ?></td>
                         <td>
                             <button class="button button-small view-record" data-id="<?php echo $row->id; ?>">View</button>
                             <button class="button button-small edit-record" data-id="<?php echo $row->id; ?>">Edit</button>
@@ -773,11 +820,11 @@ function vtr_render_report_page() {
                             </td>
                         </tr>
                         <tr>
-                            <th><label for="edit-current-duration">Current Duration</label></th>
+                            <th><label for="edit-current-duration">Total Minutes Consumed</label></th>
                             <td><input type="text" id="edit-current-duration" name="current_duration" placeholder="00:00:00" /></td>
                         </tr>
                         <tr>
-                            <th><label for="edit-full-duration">Full Duration</label></th>
+                            <th><label for="edit-full-duration">Total Duration</label></th>
                             <td><input type="text" id="edit-full-duration" name="full_duration" placeholder="00:00:00" /></td>
                         </tr>
                     </table>
@@ -976,9 +1023,15 @@ function vtr_render_report_page() {
             }
         });
 
-        // View record
-        $('.view-record').click(function() {
+        // View record - using event delegation
+        $(document).on('click', '.view-record', function(e) {
+            e.preventDefault();
             const recordId = $(this).data('id');
+            
+            if (!recordId) {
+                alert('Invalid record ID');
+                return;
+            }
             
             $.post(ajaxurl, {
                 action: 'vtr_get_record',
@@ -1003,25 +1056,33 @@ function vtr_render_report_page() {
                             <tr><th>Session ID:</th><td>${data.session_id}</td></tr>
                             <tr><th>Progress:</th><td>${data.percent}%</td></tr>
                             <tr><th>Assessment Taken:</th><td>${data.assessment_taken ? 'Yes' : 'No'}</td></tr>
-                            <tr><th>Status:</th><td>${statusLabels[data.status] || 'Unknown'}</td></tr>
-                            <tr><th>Current Duration:</th><td>${data.current_duration}</td></tr>
-                            <tr><th>Full Duration:</th><td>${data.full_duration}</td></tr>
+                            <tr><th>Training Status:</th><td>${statusLabels[data.status] || 'Unknown'}</td></tr>
+                            <tr><th>Total Minutes Consumed:</th><td>${data.current_duration}</td></tr>
+                            <tr><th>Total Duration:</th><td>${data.full_duration}</td></tr>
                             <tr><th>Last Watched:</th><td>${data.last_watched}</td></tr>
-                            <tr><th>Enrolment Date:</th><td>${data.enrolment_date || 'N/A'}</td></tr>
-                            <tr><th>Created:</th><td>${data.created_at}</td></tr>
+                            <tr><th>Enrolment Date:</th><td>${data.created_at || 'N/A'}</td></tr>
                         </table>
                     `;
                     $('#view-modal-body').html(html);
                     $('#view-modal').show();
                 } else {
-                    alert('Error: ' + response.data.message);
+                    alert('Error: ' + (response.data ? response.data.message : 'Unknown error'));
                 }
+            }).fail(function(xhr, status, error) {
+                alert('AJAX Error: ' + error);
+                console.log('Response:', xhr.responseText);
             });
         });
 
-        // Edit record
-        $('.edit-record').click(function() {
+        // Edit record - using event delegation
+        $(document).on('click', '.edit-record', function(e) {
+            e.preventDefault();
             const recordId = $(this).data('id');
+            
+            if (!recordId) {
+                alert('Invalid record ID');
+                return;
+            }
             
             $.post(ajaxurl, {
                 action: 'vtr_get_record',
@@ -1037,16 +1098,26 @@ function vtr_render_report_page() {
                     $('#edit-full-duration').val(data.full_duration);
                     $('#edit-modal').show();
                 } else {
-                    alert('Error: ' + response.data.message);
+                    alert('Error: ' + (response.data ? response.data.message : 'Unknown error'));
                 }
+            }).fail(function(xhr, status, error) {
+                alert('AJAX Error: ' + error);
+                console.log('Response:', xhr.responseText);
             });
         });
 
-        // Delete record
-        $('.delete-record').click(function() {
+        // Delete record - using event delegation
+        $(document).on('click', '.delete-record', function(e) {
+            e.preventDefault();
+            
             if (!confirm('Are you sure you want to delete this record?')) return;
             
             const recordId = $(this).data('id');
+            
+            if (!recordId) {
+                alert('Invalid record ID');
+                return;
+            }
             
             $.post(ajaxurl, {
                 action: 'vtr_delete_record',
@@ -1057,8 +1128,11 @@ function vtr_render_report_page() {
                     alert('Record deleted successfully');
                     location.reload();
                 } else {
-                    alert('Error: ' + response.data.message);
+                    alert('Error: ' + (response.data ? response.data.message : 'Unknown error'));
                 }
+            }).fail(function(xhr, status, error) {
+                alert('AJAX Error: ' + error);
+                console.log('Response:', xhr.responseText);
             });
         });
 
@@ -1066,13 +1140,25 @@ function vtr_render_report_page() {
         $('#edit-form').submit(function(e) {
             e.preventDefault();
             
+            const recordId = $('#edit-record-id').val();
+            const percent = $('#edit-percent').val();
+            const assessmentTaken = $('#edit-assessment').val();
+            const currentDuration = $('#edit-current-duration').val();
+            const fullDuration = $('#edit-full-duration').val();
+            
+            // Basic validation
+            if (!recordId || !percent) {
+                alert('Please fill in all required fields');
+                return;
+            }
+            
             $.post(ajaxurl, {
                 action: 'vtr_update_record',
-                record_id: $('#edit-record-id').val(),
-                percent: $('#edit-percent').val(),
-                assessment_taken: $('#edit-assessment').val(),
-                current_duration: $('#edit-current-duration').val(),
-                full_duration: $('#edit-full-duration').val(),
+                record_id: recordId,
+                percent: percent,
+                assessment_taken: assessmentTaken,
+                current_duration: currentDuration,
+                full_duration: fullDuration,
                 nonce: nonce
             }, function(response) {
                 if (response.success) {
@@ -1080,21 +1166,29 @@ function vtr_render_report_page() {
                     $('#edit-modal').hide();
                     location.reload();
                 } else {
-                    alert('Error: ' + response.data.message);
+                    alert('Error: ' + (response.data ? response.data.message : 'Unknown error'));
                 }
+            }).fail(function(xhr, status, error) {
+                alert('AJAX Error: ' + error);
+                console.log('Response:', xhr.responseText);
             });
         });
 
         // Close modals
-        $('.vtr-modal-close').click(function() {
+        $(document).on('click', '.vtr-modal-close', function() {
             $('.vtr-modal').hide();
         });
 
         // Close modal when clicking outside
-        $('.vtr-modal').click(function(e) {
+        $(document).on('click', '.vtr-modal', function(e) {
             if (e.target === this) {
                 $(this).hide();
             }
+        });
+
+        // Prevent modal content clicks from closing modal
+        $(document).on('click', '.vtr-modal-content', function(e) {
+            e.stopPropagation();
         });
     });
     </script>
